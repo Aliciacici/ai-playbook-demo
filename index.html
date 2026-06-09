@@ -531,6 +531,26 @@ table { border-collapse: collapse; width: 100%; }
 .diagram-text-fallback ol, .diagram-text-fallback ul { margin: 8px 0 2px 18px; padding: 0; }
 .diagram-card.image-error .diagram-text-fallback { border-color: #f59e0b; background: #fffbeb; }
 
+
+.real-ai-card { border: 1px solid #bbf7d0; background: linear-gradient(135deg,#f0fdf4,#fff); }
+.real-ai-grid { display: grid; grid-template-columns: 1.3fr 1fr; gap: 14px; align-items: end; }
+.real-ai-grid input { width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; font: inherit; }
+.real-ai-switch { display: flex; gap: 10px; align-items: center; font-weight: 700; }
+.real-ai-switch input { width: 18px; height: 18px; }
+.backend-status { margin-top: 10px; border: 1px dashed #86efac; border-radius: 12px; padding: 10px 12px; font-size: .88rem; color: #166534; background: #f0fdf4; }
+.backend-status.off { border-color: var(--border); color: var(--muted); background: #f8fafc; }
+.backend-status.error { border-color: #fecaca; color: #991b1b; background: #fff7f7; }
+.backend-status.running { border-color: #fde68a; color: #92400e; background: #fffbeb; }
+.backend-status.fallback { border-color: #fed7aa; color: #9a3412; background: #fff7ed; }
+.mode-controls { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+.mode-chip { display: inline-flex; gap: 8px; align-items: center; border: 1px solid var(--line); background: #fff; border-radius: 999px; padding: 8px 11px; font-size: .84rem; font-weight: 850; color: var(--ink); }
+.mode-chip input { width: 16px; height: 16px; }
+.demo-plan { margin-top: 10px; border: 1px solid #bfdbfe; background: #eff6ff; color: #1e3a8a; border-radius: 12px; padding: 10px 12px; font-size: .86rem; line-height: 1.45; }
+.demo-plan strong { display: inline-block; margin-right: 4px; }
+.demo-plan code { background: rgba(255,255,255,.68); border: 1px solid #dbeafe; border-radius: 6px; padding: 1px 5px; }
+.real-ai-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+@media (max-width: 860px) { .real-ai-grid { grid-template-columns: 1fr; } }
+
 </style>
   <meta name="description" content="AI Playbook platform for article intake, extraction, paper classification, prompt optimization, output generation, fidelity scoring, and QA failure logging." />
 </head>
@@ -592,6 +612,42 @@ table { border-collapse: collapse; width: 100%; }
     <div id="loopGuide" class="loop-guide idle" aria-live="polite">
       <strong>Loop guide</strong><span>Generate with the original prompt, score, log, then optimize only if needed.</span>
     </div>
+
+    <section class="card real-ai-card" id="real-ai-backend">
+      <div class="section-head">
+        <div>
+          <p class="section-kicker">AI</p>
+          <h2>real AI backend</h2>
+          <p class="hint">真实 AI 模式会调用 Supabase Edge Function；OpenRouter key 保存在 Supabase Secrets，不会进入前端。</p>
+        </div>
+        <label class="real-ai-switch"><input id="realAiToggle" type="checkbox" /> Use real AI</label>
+      </div>
+      <div class="mode-controls" aria-label="Demo mode controls">
+        <label class="mode-chip"><input id="autoFallbackToggle" type="checkbox" checked /> Auto fallback to local demo</label>
+        <label class="mode-chip"><input id="preferLocalToggle" type="checkbox" /> Present with local demo first</label>
+      </div>
+      <div class="demo-plan">
+        <strong>Recommended demo strategy:</strong>
+        Use <code>Local Demo Mode</code> for the full workflow, then switch on <code>Real AI Mode</code> for a one-output live proof. If the free model is rate-limited, the page automatically falls back and keeps the presentation moving.
+      </div>
+      <div class="real-ai-grid">
+        <div>
+          <label class="label" for="backendUrl">Supabase Function URL</label>
+          <input id="backendUrl" type="url" placeholder="https://YOUR-PROJECT.supabase.co/functions/v1/ai-playbook" />
+        </div>
+        <div>
+          <label class="label" for="anonKey">Supabase anon public key</label>
+          <input id="anonKey" type="password" placeholder="Paste anon key here, not service_role key" />
+        </div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button id="saveBackendConfig" type="button" class="primary">保存后端配置</button>
+        <button id="testBackendBtn" type="button" class="ghost">测试连接</button>
+        <button id="clearBackendConfig" type="button" class="ghost">清除配置</button>
+      </div>
+      <div id="backendStatus" class="backend-status off">Real AI backend is off. 当前仍使用前端规则式 demo。</div>
+      <div id="fallbackStatus" class="backend-status fallback" style="display:none"></div>
+    </section>
 
     <section class="card" id="article-intake">
       <div class="section-head">
@@ -2162,6 +2218,387 @@ function activateToc() {
   for (const s of sections) if (s.offsetTop <= y) active = s.id;
   document.querySelectorAll('.toc a').forEach(a => a.classList.toggle('active', a.getAttribute('href') === '#' + active));
 }
+
+
+/* === Real AI backend adapter: Supabase Edge Function + OpenRouter === */
+const backendDimensionMap = {
+  'D1 Evidence Grounding': 'D1',
+  'D2 Scope Fidelity': 'D2',
+  'D3 Methodological Alignment': 'D3',
+  'D4 Output Structure Completeness': 'D4',
+  'D5 Audience Fit': 'D5',
+  'D6 Actionability': 'D6',
+  'D7 Release Readiness': 'D7'
+};
+const backendConfigKey = 'aiPlaybookBackendConfig';
+const outputNameToKey = Object.fromEntries(Object.entries(outputSpecs).map(([key, spec]) => [spec.name, key]));
+
+state.realAI = { enabled: false, autoFallback: true, preferLocal: false, functionUrl: '', anonKey: '', lastArticleId: null, lastPromptVersionId: null, lastVersionNumber: 1, lastOptimizedPrompt: '', lastOptimizationPatch: '', lastFailure: null, fallbackCount: 0 };
+
+function backendStatus(message, kind = 'off') {
+  const el = $('backendStatus');
+  if (!el) return;
+  el.className = `backend-status ${kind}`;
+  el.textContent = message;
+}
+
+function fallbackStatus(message = '', show = false) {
+  const el = $('fallbackStatus');
+  if (!el) return;
+  el.style.display = show ? '' : 'none';
+  el.textContent = message;
+}
+
+function rememberRealAIFailure(stage, error) {
+  const msg = error?.message || String(error || 'Unknown error');
+  state.realAI.lastFailure = { stage, message: msg, at: nowISO() };
+  state.realAI.fallbackCount = Number(state.realAI.fallbackCount || 0) + 1;
+  fallbackStatus(`Fallback active after ${stage}: ${msg}. Local demo mode is running so the presentation can continue.`, true);
+}
+
+function shouldUseLocalFirst() {
+  return !!state.realAI?.preferLocal || !realAIReady();
+}
+
+function loadBackendConfig() {
+  let cfg = {};
+  try {
+    cfg = JSON.parse(localStorage.getItem(backendConfigKey) || '{}');
+    state.realAI = { ...state.realAI, ...cfg };
+  } catch {}
+  state.realAI.autoFallback = cfg.autoFallback !== false;
+  state.realAI.preferLocal = !!cfg.preferLocal;
+  if ($('backendUrl')) $('backendUrl').value = state.realAI.functionUrl || 'https://kwihyytlhfrltpirjzar.supabase.co/functions/v1/ai-playbook';
+  if ($('anonKey')) $('anonKey').value = state.realAI.anonKey || '';
+  if ($('realAiToggle')) $('realAiToggle').checked = !!state.realAI.enabled;
+  if ($('autoFallbackToggle')) $('autoFallbackToggle').checked = state.realAI.autoFallback !== false;
+  if ($('preferLocalToggle')) $('preferLocalToggle').checked = !!state.realAI.preferLocal;
+  refreshBackendStatus();
+}
+
+function saveBackendConfig() {
+  state.realAI.enabled = !!$('realAiToggle')?.checked;
+  state.realAI.autoFallback = $('autoFallbackToggle') ? !!$('autoFallbackToggle').checked : true;
+  state.realAI.preferLocal = $('preferLocalToggle') ? !!$('preferLocalToggle').checked : false;
+  state.realAI.functionUrl = ($('backendUrl')?.value || '').trim();
+  state.realAI.anonKey = ($('anonKey')?.value || '').trim();
+  localStorage.setItem(backendConfigKey, JSON.stringify({ enabled: state.realAI.enabled, autoFallback: state.realAI.autoFallback, preferLocal: state.realAI.preferLocal, functionUrl: state.realAI.functionUrl, anonKey: state.realAI.anonKey }));
+  refreshBackendStatus();
+  toast(state.realAI.enabled ? 'Real AI backend saved.' : 'Real AI backend saved but disabled.');
+}
+
+function clearBackendConfig() {
+  localStorage.removeItem(backendConfigKey);
+  state.realAI = { enabled: false, autoFallback: true, preferLocal: false, functionUrl: '', anonKey: '', lastArticleId: null, lastPromptVersionId: null, lastVersionNumber: 1, lastOptimizedPrompt: '', lastOptimizationPatch: '', lastFailure: null, fallbackCount: 0 };
+  if ($('backendUrl')) $('backendUrl').value = '';
+  if ($('anonKey')) $('anonKey').value = '';
+  if ($('realAiToggle')) $('realAiToggle').checked = false;
+  if ($('autoFallbackToggle')) $('autoFallbackToggle').checked = true;
+  if ($('preferLocalToggle')) $('preferLocalToggle').checked = false;
+  fallbackStatus('', false);
+  refreshBackendStatus();
+}
+
+function realAIReady() {
+  return !!(state.realAI?.enabled && state.realAI.functionUrl && state.realAI.anonKey);
+}
+
+function refreshBackendStatus() {
+  if (!state.realAI?.enabled) return backendStatus('Local Demo Mode active. 当前使用前端规则式 demo，适合稳定课堂展示。', 'off');
+  if (!state.realAI.functionUrl || !state.realAI.anonKey) return backendStatus('Real AI backend is enabled, but Function URL or anon key is missing.', 'error');
+  if (state.realAI.preferLocal) return backendStatus('Local-first presentation mode is active. Real AI is configured and can be tested, but generation uses local demo first.', 'off');
+  backendStatus('Real AI Mode enabled. 生成、评分、prompt 优化将调用 Supabase Edge Function；失败时可自动 fallback。', '');
+}
+
+async function callPlaybookBackend(payload) {
+  if (!realAIReady()) throw new Error('Real AI backend is not configured.');
+  const response = await fetch(state.realAI.functionUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${state.realAI.anonKey}`,
+      'apikey': state.realAI.anonKey
+    },
+    body: JSON.stringify(payload)
+  });
+  const text = await response.text();
+  let data;
+  try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+  if (!response.ok) throw new Error(data?.error?.message || data?.error || data?.message || text || `HTTP ${response.status}`);
+  return data;
+}
+
+async function testBackendConnection() {
+  saveBackendConfig();
+  try {
+    backendStatus('Testing Supabase Edge Function...', 'running');
+    const data = await callPlaybookBackend({ action: 'health' });
+    backendStatus(`Connected: ${data.provider || 'backend'} · ${data.model || 'model unknown'}`, '');
+    toast('Backend connected.');
+  } catch (err) {
+    rememberRealAIFailure('connection test', err);
+    backendStatus(`Backend test failed: ${err.message}`, 'error');
+    toast(`Backend error: ${err.message}`);
+  }
+}
+
+function backendOutputKey(name) {
+  if (outputNameToKey[name]) return outputNameToKey[name];
+  const normalized = String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+  return Object.keys(outputSpecs).find(k => k.toLowerCase() === normalized) || state.currentOutputType || 'Executive_Summary';
+}
+
+function backendScoresToLocal(scoreObj = {}) {
+  const out = { D1: 1, D2: 1, D3: 1, D4: 1, D5: 1, D6: 1, D7: 1 };
+  Object.entries(scoreObj).forEach(([k, v]) => {
+    const dim = backendDimensionMap[k] || (String(k).match(/^D[1-7]/)?.[0]);
+    if (dim) out[dim] = Math.max(1, Math.min(5, Math.round(Number(v) || 1)));
+  });
+  return out;
+}
+
+function backendFailureModes(failureModes = []) {
+  if (!Array.isArray(failureModes)) return [];
+  return [...new Set(failureModes.map(f => typeof f === 'string' ? f : (f.type || f.signature || 'qa_failure')).filter(Boolean))];
+}
+
+function backendResultToLocal(item, response) {
+  const backendName = item?.output?.output_type || 'Executive Summary';
+  const key = backendOutputKey(backendName);
+  const spec = outputSpecs[key] || { name: backendName };
+  const scores = backendScoresToLocal(item?.score?.scores || {});
+  const mean = Number(item?.score?.averageScore || (Object.values(scores).reduce((a,b)=>a+b,0)/7).toFixed(2));
+  const review = item?.score?.review_notes || item?.score?.disposalMethod || '';
+  const notes = { D1: [], D2: [], D3: [], D4: [], D5: [], D6: [], D7: [] };
+  Object.keys(notes).forEach(d => { if (review) notes[d] = [review]; });
+  return resultWithDisposal({
+    timestamp: nowISO(),
+    outputType: key,
+    outputName: spec.name || backendName,
+    tradition: response?.extracted?.detected_tradition || response?.article?.detected_tradition || 'Unknown',
+    promptVersion: response?.promptVersion?.version_label || state.promptVersion,
+    promptMode: response?.promptVersion?.optimized_prompt ? 'optimized' : state.promptMode,
+    scores,
+    notes,
+    failureModes: backendFailureModes(item?.score?.failure_modes || []),
+    mean,
+    wordCount: wordCount(item?.output?.content || ''),
+    backendScoreRunId: item?.scoreRunId || null,
+    backendDisposalMethod: item?.score?.disposalMethod || null,
+    backendReleaseAllowed: !!item?.score?.releaseAllowed
+  });
+}
+
+function updateStateFromBackendRun(response, selectedKeys) {
+  state.realAI.lastArticleId = response?.article?.id || state.realAI.lastArticleId;
+  state.realAI.lastPromptVersionId = response?.promptVersion?.id || state.realAI.lastPromptVersionId;
+  state.realAI.lastVersionNumber = response?.promptVersion?.version_number || state.realAI.lastVersionNumber || 1;
+  state.promptVersion = response?.promptVersion?.version_label || state.promptVersion;
+  state.promptRevision = Math.max(0, Number(state.realAI.lastVersionNumber || 1) - 3);
+  state.promptMode = response?.promptVersion?.optimized_prompt ? 'optimized' : state.promptMode;
+
+  if (response?.extracted) {
+    const ex = response.extracted;
+    state.classification = {
+      primary: ex.detected_tradition || response.article?.detected_tradition || 'Unknown',
+      secondary: null,
+      confidence: 0.88,
+      scores: {},
+      claim_posture: ex.rationale || 'AI-classified methodological route; verify if needed.',
+      manual_check_required: false
+    };
+    state.evidence = state.evidence || {
+      metadata: { title: response.article?.title || ex.title || 'Untitled article', source_file: state.fileName || null, extracted_at: nowISO() },
+      abstract: state.articleText.slice(0, 1000),
+      research_question_or_problem: state.articleText.slice(0, 650),
+      methods_or_design: ex.rationale || '',
+      main_findings: (ex.evidence || []).map(e => e.claim || e.support).filter(Boolean).slice(0, 6),
+      implications: [],
+      scope_conditions: 'Generated by real AI backend from supplied article.',
+      limitations: 'Use only details present in the uploaded or pasted text.',
+      evidence_boundary: 'Backend extraction; do not invent unsupported claims.'
+    };
+    state.evidence.metadata.title = response.article?.title || ex.title || state.evidence.metadata.title;
+    state.evidence.methods_or_design = ex.rationale || state.evidence.methods_or_design;
+    state.evidence.main_findings = (ex.evidence || []).map(e => `${e.claim || ''}${e.support ? ' — ' + e.support : ''}`).filter(Boolean).slice(0, 8);
+  }
+
+  const localScores = [];
+  (response?.results || []).forEach(item => {
+    const key = backendOutputKey(item?.output?.output_type);
+    state.outputs[key] = item?.output?.content || '';
+    state.outputMeta[key] = {
+      promptVersion: response?.promptVersion?.version_label || state.promptVersion,
+      promptMode: response?.promptVersion?.optimized_prompt ? 'optimized' : state.promptMode,
+      generatedAt: item?.output?.created_at || nowISO(),
+      backendOutputId: item?.output?.id || null,
+      backendScoreRunId: item?.scoreRunId || null
+    };
+    const converted = backendResultToLocal(item, response);
+    localScores.push(converted);
+    addLog(converted, 'real AI run_batch');
+  });
+
+  state.batchScores = localScores;
+  const firstKey = localScores[0]?.outputType || selectedKeys?.[0] || state.currentOutputType;
+  state.currentOutputType = firstKey;
+  state.selectedType = firstKey;
+  if ($('outputType')) $('outputType').value = firstKey;
+  state.scores = localScores.find(r => r.outputType === firstKey) || localScores[0] || state.scores;
+}
+
+async function generateSelectedWithBackend(optimized = false) {
+  if (!state.articleText.trim()) { toast(t('needText')); return null; }
+  const checked = selectedOutputKeys();
+  const keys = checked.length ? checked : [$('outputType').value || state.selectedType];
+  try {
+    backendStatus(`Running real AI for ${keys.length} output(s)...`, 'running');
+    const payload = {
+      action: 'run_batch',
+      articleText: state.articleText,
+      notes: '',
+      selectedOutputs: keys.map(k => outputSpecs[k]?.name || k),
+      versionNumber: Math.max(1, Number(state.realAI.lastVersionNumber || 1)),
+      optimizedPrompt: (optimized || state.promptMode === 'optimized') ? (state.realAI.lastOptimizedPrompt || state.customSystemPrompt || '') : undefined,
+      optimizationPatch: (optimized || state.promptMode === 'optimized') ? (state.realAI.lastOptimizationPatch || state.optimizerText || '') : undefined
+    };
+    const response = await callPlaybookBackend(payload);
+    updateStateFromBackendRun(response, keys);
+    renderAll();
+    backendStatus(`Real AI completed: ${response.results?.length || 0} output(s).`, '');
+    toast(`${t('generated')}: ${response.results?.length || 0}`);
+    return response;
+  } catch (err) {
+    rememberRealAIFailure('real AI generation/scoring', err);
+    backendStatus(`Real AI failed: ${err.message}`, 'error');
+    toast(`Real AI unavailable; switching to local demo mode.`);
+    if (state.realAI.autoFallback !== false && typeof __localGenerateSelected === 'function') {
+      const localResult = await __localGenerateSelected(optimized);
+      renderAll();
+      return localResult;
+    }
+    return null;
+  }
+}
+
+async function optimizePromptFromBackend(options = {}) {
+  if (!state.realAI.lastArticleId || !state.realAI.lastPromptVersionId) {
+    toast('Run real AI generation/scoring first, then optimize prompt.');
+    return null;
+  }
+  try {
+    backendStatus('Optimizing prompt from failure logs...', 'running');
+    const response = await callPlaybookBackend({
+      action: 'optimize_prompt',
+      articleId: state.realAI.lastArticleId,
+      previousPromptVersionId: state.realAI.lastPromptVersionId,
+      previousVersionNumber: Number(state.realAI.lastVersionNumber || 1)
+    });
+    state.realAI.lastPromptVersionId = response?.newPromptVersion?.id || state.realAI.lastPromptVersionId;
+    state.realAI.lastVersionNumber = response?.newPromptVersion?.version_number || (Number(state.realAI.lastVersionNumber || 1) + 1);
+    state.realAI.lastOptimizedPrompt = response?.newPromptVersion?.optimized_prompt || response?.optimization?.optimized_prompt || '';
+    state.realAI.lastOptimizationPatch = response?.newPromptVersion?.optimization_patch || response?.optimization?.optimization_patch || '';
+    state.promptVersion = response?.newPromptVersion?.version_label || `Prompt v${state.realAI.lastVersionNumber}`;
+    state.promptMode = 'optimized';
+    state.optimizerText = state.realAI.lastOptimizationPatch;
+    state.customOutputPrompt = state.realAI.lastOptimizedPrompt || state.customOutputPrompt;
+    state.activePatch = { version: state.promptVersion, createdAt: nowISO(), outputType: state.currentOutputType, failureModes: state.scores?.failureModes || [], backendLoopId: response?.loop?.id || null };
+    state.optimizationHistory.push(state.activePatch);
+    updatePromptPanels();
+    updateLoopVisuals();
+    backendStatus(`Prompt optimized: ${state.promptVersion}. Next generation will use the optimized prompt.`, '');
+    if (!options.silent) toast(`Prompt optimized: ${state.promptVersion}`);
+    return response;
+  } catch (err) {
+    rememberRealAIFailure('prompt optimization', err);
+    backendStatus(`Prompt optimization failed: ${err.message}`, 'error');
+    toast(`Prompt optimization fallback: local demo patch generated.`);
+    if (state.realAI.autoFallback !== false && typeof __localOptimizePromptFromScore === 'function') {
+      return __localOptimizePromptFromScore(options);
+    }
+    return null;
+  }
+}
+
+async function runRealAIFixLoop() {
+  if (!state.scores) { toast(t('needScore')); return null; }
+  if (!isLowScore(state.scores)) { toast(t('passMessage')); return null; }
+  try {
+    const opt = await optimizePromptFromBackend({ silent: true });
+    if (!opt) throw new Error('Prompt optimization did not return a usable patch.');
+    state.selectedOutputKeys = [state.currentOutputType];
+    const rerun = await generateSelectedWithBackend(true);
+    if (rerun) backendStatus(`Remediation loop completed: ${state.promptVersion}. Heatmap refreshed with latest score.`, '');
+    return rerun;
+  } catch (err) {
+    rememberRealAIFailure('fix loop', err);
+    if (state.realAI.autoFallback !== false && typeof __localRunFixLoop === 'function') {
+      toast('Fix loop fallback: local demo loop is running.');
+      return __localRunFixLoop();
+    }
+    return null;
+  }
+}
+
+const __originalInit = init;
+const __localGenerateSelected = generateSelected;
+const __localScoreCurrentOutput = scoreCurrentOutput;
+const __localScoreBatchOutputs = scoreBatchOutputs;
+const __localOptimizePromptFromScore = optimizePromptFromScore;
+const __localRunFixLoop = runFixLoop;
+
+init = function() {
+  __originalInit();
+  loadBackendConfig();
+  $('realAiToggle')?.addEventListener('change', saveBackendConfig);
+  $('autoFallbackToggle')?.addEventListener('change', saveBackendConfig);
+  $('preferLocalToggle')?.addEventListener('change', saveBackendConfig);
+  $('saveBackendConfig')?.addEventListener('click', saveBackendConfig);
+  $('testBackendBtn')?.addEventListener('click', testBackendConnection);
+  $('clearBackendConfig')?.addEventListener('click', clearBackendConfig);
+};
+
+generateSelected = async function(optimized = false) {
+  if (shouldUseLocalFirst()) return __localGenerateSelected(optimized);
+  return await generateSelectedWithBackend(optimized);
+};
+
+scoreCurrentOutput = async function(action = 'score') {
+  if (!shouldUseLocalFirst()) {
+    if (state.scores && state.outputs[state.currentOutputType]) {
+      renderScores();
+      updateLoopVisuals();
+      toast('Real AI score already returned with generation.');
+      return state.scores;
+    }
+    state.selectedOutputKeys = [state.currentOutputType || state.selectedType];
+    await generateSelectedWithBackend(false);
+    return state.scores;
+  }
+  return __localScoreCurrentOutput(action);
+};
+
+scoreBatchOutputs = async function() {
+  if (!shouldUseLocalFirst()) {
+    if (!state.batchScores?.length) await generateSelectedWithBackend(false);
+    renderBatchScores();
+    renderScores();
+    toast('Real AI batch score matrix refreshed.');
+    return state.batchScores;
+  }
+  return __localScoreBatchOutputs();
+};
+
+optimizePromptFromScore = async function(options = {}) {
+  if (!shouldUseLocalFirst()) return await optimizePromptFromBackend(options);
+  return __localOptimizePromptFromScore(options);
+};
+
+runFixLoop = async function() {
+  if (!shouldUseLocalFirst()) return await runRealAIFixLoop();
+  return __localRunFixLoop();
+};
+
 
 init();
 
