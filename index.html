@@ -636,7 +636,7 @@ table { border-collapse: collapse; width: 100%; }
           <input id="backendUrl" type="url" placeholder="https://YOUR-PROJECT.supabase.co/functions/v1/ai-playbook" />
         </div>
         <div>
-          <label class="label" for="anonKey">Supabase anon public key</label>
+          <label class="label" for="anonKey">Supabase anon public key <span style="font-weight:500;color:#64748b">(optional in no-preflight demo mode)</span></label>
           <input id="anonKey" type="password" placeholder="Paste anon key here, not service_role key" />
         </div>
       </div>
@@ -2300,27 +2300,33 @@ function clearBackendConfig() {
 }
 
 function realAIReady() {
-  return !!(state.realAI?.enabled && state.realAI.functionUrl && state.realAI.anonKey);
+  return !!(state.realAI?.enabled && state.realAI.functionUrl);
 }
 
 function refreshBackendStatus() {
   if (!state.realAI?.enabled) return backendStatus('Local Demo Mode active. 当前使用前端规则式 demo，适合稳定课堂展示。', 'off');
-  if (!state.realAI.functionUrl || !state.realAI.anonKey) return backendStatus('Real AI backend is enabled, but Function URL or anon key is missing.', 'error');
+  if (!state.realAI.functionUrl) return backendStatus('Real AI backend is enabled, but Function URL is missing.', 'error');
   if (state.realAI.preferLocal) return backendStatus('Local-first presentation mode is active. Real AI is configured and can be tested, but generation uses local demo first.', 'off');
   backendStatus('Real AI Mode enabled. 生成、评分、prompt 优化将调用 Supabase Edge Function；失败时可自动 fallback。', '');
 }
 
 async function callPlaybookBackend(payload) {
   if (!realAIReady()) throw new Error('Real AI backend is not configured.');
+
+  // Demo-safe no-preflight request:
+  // For GitHub Pages -> Supabase Edge Function calls, JSON + auth headers may trigger
+  // a browser CORS preflight that can fail before the request reaches the function.
+  // With Verify JWT turned OFF in Supabase Function Settings, this text/plain request
+  // avoids preflight and keeps the live demo stable. The OpenRouter key remains secure
+  // inside Supabase Secrets and is never sent to the browser.
   const response = await fetch(state.realAI.functionUrl, {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${state.realAI.anonKey}`,
-      'apikey': state.realAI.anonKey
+      'Content-Type': 'text/plain;charset=UTF-8'
     },
     body: JSON.stringify(payload)
   });
+
   const text = await response.text();
   let data;
   try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
